@@ -52,12 +52,24 @@
 #define EXPAND(A) A ## 1
 #define ISEMPTY(A) EXPAND(A)
 
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+
+/* macOS uses single underscore prefix for C library symbols */
 #if !defined(LIBC_OPEN) || (ISEMPTY(LIBC_OPEN) == 1)
+#ifdef __APPLE__
+#define LIBC_OPEN _open
+#else
 #error name of libc open() could not be determined - test cannot be performed
+#endif
 #endif
 
 #if !defined(LIBC_WRITE) || (ISEMPTY(LIBC_WRITE) == 1)
+#ifdef __APPLE__
+#define LIBC_WRITE _write
+#else
 #error name of libc write() could not be determined - test cannot be performed
+#endif
 #endif
 
 /* Block number where we start signalling imminent end of tape */
@@ -85,7 +97,7 @@ int LIBC_OPEN(const char *path, int oflag, ...)
 	int mode = va_arg(val,int);
 	va_end(val);
 	if (0 == orig_open) {
-		orig_open = (open_func_t)dlsym(RTLD_NEXT, "open");
+		orig_open = (open_func_t)dlsym(RTLD_NEXT, TOSTRING(LIBC_OPEN));
 	}
 	if (strncmp(path, "output", 6) == 0) {
 		printf("[INTERCEPT] open: %s", path);
@@ -116,7 +128,7 @@ int LIBC_OPEN(const char *path, int oflag, ...)
 ssize_t LIBC_WRITE(int filedes, const void *buf, size_t nbyte)
 {
 	if (0 == orig_write) {
-		orig_write = (write_func_t)dlsym(RTLD_NEXT, "write");
+		orig_write = (write_func_t)dlsym(RTLD_NEXT, TOSTRING(LIBC_WRITE));
 	}
 	if (filedes == file) {
 		printf("[INTERCEPT] write(block %d): ", block);

@@ -34,9 +34,32 @@
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
 
+/* macOS uses single underscore prefix for C library symbols */
+#if ISEMPTY(LIBC_OPEN)
+#undef LIBC_OPEN
+#ifdef __APPLE__
+#define LIBC_OPEN _open
+#else
+#define LIBC_OPEN open
+#endif
+#endif
+
+#if ISEMPTY(LIBC_READ)
+#undef LIBC_READ
+#ifdef __APPLE__
+#define LIBC_READ _read
+#else
+#define LIBC_READ read
+#endif
+#endif
+
 #if ISEMPTY(LIBC_FSTAT)
 #undef LIBC_FSTAT
+#ifdef __APPLE__
+#define LIBC_FSTAT _fstat
+#else
 #define LIBC_FSTAT fstat
+#endif
 #endif
 
 
