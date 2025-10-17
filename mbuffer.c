@@ -284,8 +284,7 @@ static void statusThread(void)
 		diff = now.tv_sec - last.tv_sec + (double) (now.tv_nsec - last.tv_nsec) * 1E-9;
 		err = pthread_mutex_lock(&TermMut);
 		assert(0 == err);
-		err = sem_getvalue(&Buf2Dev,&unwritten);
-		assert(0 == err);
+		unwritten = (int)counter_getvalue(&FullBlocks);
 		fill = (double)unwritten / (double)Numblocks * 100.0;
 		in = (double)(((Numin - lin) * Blocksize) >> 10);
 		in /= diff;
@@ -364,8 +363,7 @@ int syncSenders(char *b, int s)
 		buf = 0;
 		if (skipped) {
 			// after the first time, always give a buffer free after sync
-			err = sem_post(&Dev2Buf);
-			assert(err == 0);
+			counter_post(&FreeBlocks, &FreeMut, &FreeCond);
 		} else {
 			// the first time no buffer has been given free
 			skipped = 1;
@@ -650,7 +648,7 @@ static void terminateOutputThread(dest_t *d, int status)
 			errormsg("error writing to termination queue: %s\n",strerror(errno));
 	}
 	if (status) {
-		(void) sem_post(&Dev2Buf);
+		(void) counter_post(&FreeBlocks, &FreeMut, &FreeCond);
 		(void) pthread_cond_broadcast(&SendCond);
 	}
 	Done = 1;
@@ -724,8 +722,7 @@ static void *outputThread(void *arg)
 			assert(fill == 0);
 			err = pthread_mutex_lock(&HighMut);
 			assert(err == 0);
-			err = sem_getvalue(&Buf2Dev,&fill);
-			assert(err == 0);
+			fill = (int)counter_getvalue(&FullBlocks);
 			if (fill == 0) {
 				debugmsg("outputThread: buffer empty, waiting for it to fill\n");
 				pthread_cleanup_push(releaseLock,&HighMut);
@@ -740,16 +737,14 @@ static void *outputThread(void *arg)
 			assert(err == 0);
 		} else
 			--fill;
-		err = sem_wait(&Buf2Dev);
-		assert(err == 0);
+		counter_wait(&FullBlocks, &FullMut, &FullCond);
 		if (Terminate) {
 			infomsg("outputThread: terminating upon termination request...\n");
 			dest->result = "canceled";
 			terminateOutputThread(dest,1);
 		}
 		if (Finish == at) {
-			err = sem_getvalue(&Buf2Dev,&fill);
-			assert(err == 0);
+			fill = (int)counter_getvalue(&FullBlocks);
 			if ((fill == 0) && (0 == Rest)) {
 				if (multipleSenders)
 					(void) syncSenders((char*)0xdeadbeef,0);
@@ -842,8 +837,7 @@ static void *outputThread(void *arg)
 				if (NumSenders == 0) {
 					debugmsg("outputThread: terminating...\n");
 					Terminate = 1;
-					err = sem_post(&Dev2Buf);
-					assert(err == 0);
+					counter_post(&FreeBlocks, &FreeMut, &FreeCond);
 					terminateOutputThread(dest,1);
 				}
 				debugmsg("outputThread: %d senders remaining - continuing...\n",NumSenders);
@@ -852,16 +846,14 @@ static void *outputThread(void *arg)
 			rest -= num;
 		} while (rest > 0);
 		if (multipleSenders == 0) {
-			err = sem_post(&Dev2Buf);
-			assert(err == 0);
+			counter_post(&FreeBlocks, &FreeMut, &FreeCond);
 		}
 		if (MaxWriteSpeed)
 			xfer = enforceSpeedLimit(MaxWriteSpeed,xfer,&last);
 		if (Pause)
 			(void) mt_usleep(Pause);
 		if (Finish == at) {
-			err = sem_getvalue(&Buf2Dev,&fill);
-			assert(err == 0);
+			fill = (int)counter_getvalue(&FullBlocks);
 			if (fill == 0) {
 				if (multipleSenders)
 					(void) syncSenders((char*)0xdeadbeef,0);
@@ -874,8 +866,7 @@ static void *outputThread(void *arg)
 		if (StartRead < 1) {
 			err = pthread_mutex_lock(&LowMut);
 			assert(err == 0);
-			err = sem_getvalue(&Buf2Dev,&fill);
-			assert(err == 0);
+			fill = (int)counter_getvalue(&FullBlocks);
 			if (((double)fill / (double)Numblocks) < StartRead) {
 				err = pthread_cond_signal(&PercLow);
 				assert(err == 0);
@@ -1059,8 +1050,7 @@ static void initDefaults()
 	if (AvP) {
 		Blocksize = PgSz;
 		Numblocks = AvP/20;
-		long mxsemv = maxSemValue();
-		while ((Numblocks > mxsemv) || (Numblocks > 2000)) {
+		while (Numblocks > 2000) {
 			Numblocks >>= 1;
 			Blocksize <<= 1;
 		}
@@ -1252,11 +1242,9 @@ int main(int argc, const char **argv)
 	checkConsistency();
 	initBuffer();
 
-	debugmsg("creating semaphores...\n");
-	if (0 != sem_init(&Buf2Dev,0,0))
-		fatal("Error creating semaphore Buf2Dev: %s\n",strerror(errno));
-	if (0 != sem_init(&Dev2Buf,0,Numblocks))
-		fatal("Error creating semaphore Dev2Buf: %s\n",strerror(errno));
+	debugmsg("initializing buffer counters...\n");
+	counter_init(&FullBlocks, 0);        /* initially no full blocks */
+	counter_init(&FreeBlocks, Numblocks); /* initially all blocks free */
 
 	if (Infile)
 		openInput();

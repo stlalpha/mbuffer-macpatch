@@ -189,3 +189,56 @@ const char *hBytes(unsigned long long v)
 }
 
 
+/*
+ * Condition variable-based counting synchronization primitives.
+ * These replace POSIX semaphores to remove the 2GB buffer limit.
+ *
+ * Semaphores are limited to INT_MAX (~2 billion), which restricts
+ * the number of buffer blocks. Using 64-bit counters with mutex+condvar
+ * removes this artificial limitation.
+ */
+
+void counter_init(volatile long long *counter, long long initial_value)
+{
+	*counter = initial_value;
+}
+
+void counter_wait(volatile long long *counter, pthread_mutex_t *mutex, pthread_cond_t *cond)
+{
+	int err = pthread_mutex_lock(mutex);
+	assert(err == 0);
+
+	while (*counter <= 0) {
+		err = pthread_cond_wait(cond, mutex);
+		assert(err == 0);
+	}
+
+	(*counter)--;
+
+	err = pthread_mutex_unlock(mutex);
+	assert(err == 0);
+}
+
+void counter_post(volatile long long *counter, pthread_mutex_t *mutex, pthread_cond_t *cond)
+{
+	int err = pthread_mutex_lock(mutex);
+	assert(err == 0);
+
+	(*counter)++;
+
+	err = pthread_cond_signal(cond);
+	assert(err == 0);
+
+	err = pthread_mutex_unlock(mutex);
+	assert(err == 0);
+}
+
+long long counter_getvalue(volatile long long *counter)
+{
+	/* Reading a volatile long long is atomic for the read operation.
+	 * We don't need a mutex here since this is only used for status
+	 * display, not for synchronization decisions. */
+	return *counter;
+}
+
+

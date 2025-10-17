@@ -74,16 +74,20 @@ pthread_mutex_t
 	TermMut = PTHREAD_MUTEX_INITIALIZER,	/* prevents statusThread from interfering with request*Volume */
 	LowMut = PTHREAD_MUTEX_INITIALIZER,
 	HighMut = PTHREAD_MUTEX_INITIALIZER,
-	SendMut = PTHREAD_MUTEX_INITIALIZER;
+	SendMut = PTHREAD_MUTEX_INITIALIZER,
+	FreeMut = PTHREAD_MUTEX_INITIALIZER,	/* protects FreeBlocks counter */
+	FullMut = PTHREAD_MUTEX_INITIALIZER;	/* protects FullBlocks counter */
 
-sem_t
-	Dev2Buf,
-	Buf2Dev;
+volatile long long
+	FreeBlocks = 0,		/* number of free buffer blocks (replaces Dev2Buf semaphore) */
+	FullBlocks = 0;		/* number of full buffer blocks (replaces Buf2Dev semaphore) */
 
 pthread_cond_t
 	PercLow = PTHREAD_COND_INITIALIZER,	/* low watermark */
 	PercHigh = PTHREAD_COND_INITIALIZER,	/* high watermark */
-	SendCond = PTHREAD_COND_INITIALIZER;
+	SendCond = PTHREAD_COND_INITIALIZER,
+	FreeCond = PTHREAD_COND_INITIALIZER,	/* signaled when blocks become free */
+	FullCond = PTHREAD_COND_INITIALIZER;	/* signaled when blocks become full */
 
 pthread_t
 	ReaderThr,

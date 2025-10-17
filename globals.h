@@ -21,7 +21,6 @@
 #define GLOBALS_H
 
 #include <pthread.h>
-#include <semaphore.h>
 
 extern dest_t *Dest;
 
@@ -79,16 +78,20 @@ extern pthread_mutex_t
 	TermMut,	/* prevents statusThread from interfering with request*Volume */
 	LowMut,
 	HighMut,
-	SendMut;
+	SendMut,
+	FreeMut,	/* protects FreeBlocks counter */
+	FullMut;	/* protects FullBlocks counter */
 
-extern sem_t
-	Dev2Buf,
-	Buf2Dev;
+extern volatile long long
+	FreeBlocks,	/* number of free buffer blocks (replaces Dev2Buf semaphore) */
+	FullBlocks;	/* number of full buffer blocks (replaces Buf2Dev semaphore) */
 
 extern pthread_cond_t
 	PercLow,	/* low watermark */
 	PercHigh,	/* high watermark */
-	SendCond;
+	SendCond,
+	FreeCond,	/* signaled when blocks become free */
+	FullCond;	/* signaled when blocks become full */
 
 extern pthread_t
 	ReaderThr,

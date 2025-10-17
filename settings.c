@@ -476,9 +476,7 @@ long maxSemValue()
 void initBuffer()
 {
 	int c;
-	/* check that we stay within system limits */
-	if (Numblocks > maxSemValue())
-		fatal("cannot allocate more than %d blocks.\nThis is a system dependent limit, depending on the maximum semaphore value.\nPlease choose a bigger block size.\n",maxSemValue());
+	/* Note: Semaphore limit no longer applies since we use condition variables */
 	if (Numblocks > 10000)
 		warningmsg("high value of number of blocks(%lu): increase block size for better performance\n",Numblocks);
 	unsigned long long av = AvP * PgSz, bufsize = Numblocks * Blocksize;

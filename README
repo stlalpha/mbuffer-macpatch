@@ -72,11 +72,14 @@ machine, I have no intention of working on that topic.
 
 64 Bit Buffers:
 ===============
-The buffer limit is sysconf(_SC_SEM_VALUE_MAX)*Blocksize. This usually
-limits the maximum number of blocks to 2G-1, because semaphores are
-implemented using an int, which is on most architectures a 32 Bit word.
-This limit is currently a non-issue, but might be resolved in a future
-release, by using condition variables.
+As of this version, the buffer size limitation has been removed by replacing
+POSIX semaphores with pthread condition variables and 64-bit counters. The
+previous limitation of sysconf(_SC_SEM_VALUE_MAX)*Blocksize (typically ~2GB
+due to 32-bit semaphore counters) no longer applies.
+
+Buffer size is now only limited by available system memory. The implementation
+uses volatile long long counters (64-bit) protected by mutexes, allowing buffer
+sizes well beyond the previous 2GB limitation.
 
 If the total buffer size is 2GB or larger, you will need to compile
 mbuffer as a 64bit executable. This requires that you have a 64bit

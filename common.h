@@ -42,4 +42,10 @@ void enable_directio(int fd, const char *fn);
 int disable_directio(int fd, const char *fn);
 const char *hBytes(unsigned long long v);
 
+/* Condition variable-based counting synchronization (replaces semaphores) */
+void counter_init(volatile long long *counter, long long initial_value);
+void counter_wait(volatile long long *counter, pthread_mutex_t *mutex, pthread_cond_t *cond);
+void counter_post(volatile long long *counter, pthread_mutex_t *mutex, pthread_cond_t *cond);
+long long counter_getvalue(volatile long long *counter);
+
 #endif

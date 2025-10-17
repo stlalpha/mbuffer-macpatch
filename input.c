@@ -306,8 +306,7 @@ int readBlock(unsigned at)
 				debugmsg("inputThread: last block has %llu bytes\n",num);
 				err = pthread_mutex_lock(&HighMut);
 				assert(err == 0);
-				err = sem_post(&Buf2Dev);
-				assert(err == 0);
+			counter_post(&FullBlocks, &FullMut, &FullCond);
 				err = pthread_cond_signal(&PercHigh);
 				assert(err == 0);
 				err = pthread_mutex_unlock(&HighMut);
@@ -330,8 +329,7 @@ int readBlock(unsigned at)
 			debugmsg("inputThread: last block has %llu bytes\n",num);
 			err = pthread_mutex_lock(&HighMut);
 			assert(err == 0);
-			err = sem_post(&Buf2Dev);
-			assert(err == 0);
+			counter_post(&FullBlocks, &FullMut, &FullCond);
 			err = pthread_cond_signal(&PercHigh);
 			assert(err == 0);
 			err = pthread_mutex_unlock(&HighMut);
@@ -367,8 +365,7 @@ void *inputThread(void *ignored)
 		if (startread < 1) {
 			err = pthread_mutex_lock(&LowMut);
 			assert(err == 0);
-			err = sem_getvalue(&Buf2Dev,&fill);
-			assert(err == 0);
+			fill = (int)counter_getvalue(&FullBlocks);
 			if (fill == Numblocks - 1) {
 				debugmsg("inputThread: buffer full, waiting for it to drain.\n");
 				pthread_cleanup_push(releaseLock,&LowMut);
@@ -389,21 +386,18 @@ void *inputThread(void *ignored)
 				pthread_exit((void *)1);
 			return (void *) 1;
 		}
-		err = sem_wait(&Dev2Buf); /* Wait for one or more buffer blocks to be free */
-		assert(err == 0);
+		counter_wait(&FreeBlocks, &FreeMut, &FreeCond); /* Wait for one or more buffer blocks to be free */
 		if (0 >= readBlock(at)) {
 			debugmsg("inputThread: no more blocks\n");
 			return 0;
 		}
 		if (MaxReadSpeed)
 			xfer = enforceSpeedLimit(MaxReadSpeed,xfer,&last);
-		err = sem_post(&Buf2Dev);
-		assert(err == 0);
+		counter_post(&FullBlocks, &FullMut, &FullCond);
 		if (startwrite > 0) {
 			err = pthread_mutex_lock(&HighMut);
 			assert(err == 0);
-			err = sem_getvalue(&Buf2Dev,&fill);
-			assert(err == 0);
+			fill = (int)counter_getvalue(&FullBlocks);
 			if (((double) fill / (double) Numblocks) + DBL_EPSILON >= startwrite) {
 				err = pthread_cond_signal(&PercHigh);
 				assert(err == 0);
