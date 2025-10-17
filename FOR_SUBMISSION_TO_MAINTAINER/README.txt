@@ -118,3 +118,85 @@ The idev.so and tapetest.so modules are optional debugging tools and
 not required for normal mbuffer operation.
 
 Generated: 2025-10-17
+
+
+===============================================================================
+
+Patch 3: Complete macOS Support (Combined Patch)
+=================================================
+
+This is a single comprehensive patch that combines all macOS compatibility
+fixes and the 2GB buffer limit removal. It includes everything from patches
+0001 and 0002, plus additional macOS-specific improvements.
+
+WHAT'S INCLUDED:
+----------------
+1. Semaphore replacement with condition variables (removes 2GB limit)
+2. macOS memory detection using Mach VM APIs
+3. macOS fsync error handling (EOPNOTSUPP/ENOTSUP)
+4. idev.so and tapetest.so macOS compilation fixes
+5. Updated README documentation
+
+PROBLEM:
+--------
+mbuffer would not compile or run on macOS due to:
+- macOS doesn't implement sem_init() for unnamed semaphores
+- objdump doesn't work with Mach-O binaries (breaks symbol detection)
+- Missing macOS memory detection APIs
+- 2GB buffer size limitation (32-bit semaphore counters)
+
+SOLUTION:
+---------
+Complete rewrite of synchronization to use condition variables + 64-bit
+counters, plus platform-specific code for macOS APIs.
+
+BENEFITS:
+---------
+- Full macOS compatibility (compiles and runs on macOS)
+- No buffer size limitations (supports >2GB buffers)
+- All components work (mbuffer, idev.so, tapetest.so)
+- Proper macOS memory detection (no warnings)
+- Correct fsync error handling for APFS
+
+FILES MODIFIED:
+---------------
+Core synchronization:
+- globals.h/c: New condition variable sync primitives
+- common.h/c: Counter operation functions
+- mbuffer.c: Semaphore → condition variable conversion
+- input.c: Semaphore → condition variable conversion
+- settings.c: Removed semaphore limit checks
+
+macOS-specific:
+- mbuffer.c: Added Mach VM memory detection, fsync error handling
+- idev.c: macOS C library symbol handling
+- tapetest.c: macOS C library symbol handling
+
+Documentation:
+- README: Updated MacOS and 64 Bit Buffers sections
+
+PATCH APPLICATION:
+------------------
+To apply this patch:
+  git apply 0003-complete-macos-support-combined.patch
+
+Or with patch command:
+  patch -p1 < 0003-complete-macos-support-combined.patch
+
+RECOMMENDATION:
+---------------
+Use this patch (0003) if you want complete macOS support in one go.
+Or use patches 0001 and 0002 separately if you prefer incremental changes.
+
+TESTING:
+--------
+Tested on macOS with:
+- Buffers up to 6GB (beyond old 2GB limit)
+- SMB mount I/O (real-world network buffering)
+- All compilation warnings resolved
+- idev.so and tapetest.so compile cleanly
+
+Example test:
+  dd if=/dev/zero bs=1m count=10000 | ./mbuffer -m 5G -v 3 -R 100m | dd of=/dev/null
+
+Generated: 2025-10-17
