@@ -51,6 +51,11 @@ typedef int caddr_t;
 #include <uvm/uvm_extern.h>
 #endif
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_host.h>
+#endif
+
 #ifdef HAVE_SENDFILE
 #ifdef HAVE_SENDFILE_H
 #include <sys/sendfile.h>
@@ -389,7 +394,11 @@ static inline void terminateSender(int fd, dest_t *d, intptr_t ret)
 			err = fsync(fd);
 		while ((err != 0) && (errno == EINTR));
 		if (err != 0) {
+#ifdef __APPLE__
+			if ((errno == EINVAL) || (errno == EBADRQC) || (errno == EOPNOTSUPP) || (errno == ENOTSUP)) {
+#else
 			if ((errno == EINVAL) || (errno == EBADRQC)) {
+#endif
 				infomsg("syncing unsupported on %s: omitted.\n",d->arg);
 			} else {
 				warningmsg("unable to sync %s: %s\n",d->arg,strerror(errno));
@@ -633,7 +642,11 @@ static void terminateOutputThread(dest_t *d, int status)
 		err = fsync(d->fd);
 	while ((err != 0) && (errno == EINTR));
 	if (err != 0) {
+#ifdef __APPLE__
+		if ((errno == EINVAL) || (errno == EBADRQC) || (errno == EOPNOTSUPP) || (errno == ENOTSUP)) {
+#else
 		if ((errno == EINVAL) || (errno == EBADRQC)) {
+#endif
 			infomsg("syncing unsupported on %s: omitted.\n",d->arg);
 		} else {
 			warningmsg("unable to sync %s: %s\n",d->arg,strerror(errno));
@@ -1038,8 +1051,20 @@ static void initDefaults()
 	} else {
 		AvP = total.t_free;
 	}
+#elif defined(__APPLE__)
+	/* macOS: use vm_statistics64 to get memory information */
+	mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+	vm_statistics64_data_t vm_stat;
+	if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vm_stat, &count) == KERN_SUCCESS) {
+		/* Calculate available pages: free + inactive + purgeable + speculative */
+		AvP = vm_stat.free_count + vm_stat.inactive_count +
+		      vm_stat.purgeable_count + vm_stat.speculative_count;
+	} else {
+		warningmsg("unable to determine number of available pages on macOS\n");
+		AvP = 0;
+	}
 #else
-	warningmsg("no mechanism to determine number of available pages\n",strerror(errno));
+	warningmsg("no mechanism to determine number of available pages\n");
 #endif
 	if (AvP && PgSz) {
 		debugmsg("available memory: %llukB / %li pages\n",((long long unsigned)AvP*(long long unsigned)PgSz)>>10,AvP);

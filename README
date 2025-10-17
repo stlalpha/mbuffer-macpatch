@@ -54,20 +54,16 @@ This software has been tested under the following operating systems:
 
 MacOS:
 ======
-mbuffer does not compile and run on MacOS.
+mbuffer now compiles and runs on macOS.
 
-The reason for this is the lack of the sem_getvalue interface, which
-MacOS deliberately refuses to offer. The argumentation is that the
-returned value might be incorrect by the time it gets used, as the
-semaphore value is not locked.
+Previous versions required sem_getvalue(), which macOS does not implement for
+unnamed semaphores. This version replaces POSIX semaphores with pthread
+condition variables and 64-bit counters, providing full macOS compatibility.
 
-This argumentation is irrelevant in the case of mbuffer, which uses the
-function to inspect the transient status, and thread synchronization is
-done on variables under mutual exclusion.
-
-If anybody is willing to provide a patch that works around this
-limitation, I will consider its inclusion. As I don't have a MacOS
-machine, I have no intention of working on that topic.
+macOS-specific features:
+- Memory detection using Mach VM APIs (host_statistics64)
+- Proper fsync error handling for APFS and other macOS filesystems
+- No external dependencies beyond standard POSIX threads
 
 
 64 Bit Buffers:
