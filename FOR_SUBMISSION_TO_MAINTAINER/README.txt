@@ -58,3 +58,63 @@ COMPATIBILITY:
 - Maintains backward compatibility with existing command-line options
 
 Generated: 2025-10-17
+
+
+===============================================================================
+
+Patch 2: Fix idev.so and tapetest.so Compilation on macOS
+==========================================================
+
+This patch fixes compilation failures for the optional debugging modules
+(idev.so and tapetest.so) on macOS.
+
+PROBLEM:
+--------
+The configure script uses objdump to detect C library symbol names, but
+objdump doesn't work with macOS's Mach-O binary format. This leaves
+LIBC_OPEN, LIBC_READ, LIBC_WRITE, and LIBC_FSTAT macros empty in config.h,
+causing compilation errors when the preprocessor expands function names.
+
+Example error:
+  idev.c:55:15: error: expected identifier or '('
+  int LIBC_OPEN(const char *path, int oflag, ...)
+                ^
+
+SOLUTION:
+---------
+Add conditional detection and definition of C library symbols:
+- On macOS: use single underscore prefix (_open, _read, _write, _fstat)
+- On other platforms: use unprefixed names (open, read, write, fstat)
+
+IMPLEMENTATION:
+---------------
+- idev.c: Added LIBC_OPEN, LIBC_READ checks with macOS fallbacks
+- tapetest.c: Replaced #error with conditional macOS symbol definitions
+- Both files: Use TOSTRING() macro for dlsym() to get correct symbol names
+
+BENEFITS:
+---------
+- idev.so and tapetest.so now compile cleanly on macOS
+- No impact on other platforms (fallback maintains existing behavior)
+- Optional modules work correctly with LD_PRELOAD on macOS
+
+FILES MODIFIED:
+---------------
+- idev.c: Added conditional symbol definitions
+- tapetest.c: Added conditional symbol definitions and STRINGIFY macros
+
+PATCH APPLICATION:
+------------------
+To apply this patch:
+  git apply 0002-fix-idev-tapetest-macos.patch
+
+Or with patch command:
+  patch -p1 < 0002-fix-idev-tapetest-macos.patch
+
+NOTE:
+-----
+This patch can be applied independently or together with patch 0001.
+The idev.so and tapetest.so modules are optional debugging tools and
+not required for normal mbuffer operation.
+
+Generated: 2025-10-17

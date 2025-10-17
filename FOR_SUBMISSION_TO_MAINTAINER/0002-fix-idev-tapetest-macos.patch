@@ -1,0 +1,128 @@
+From 90495240522a71a5ce3be05a5111d82ba5d73ecb Mon Sep 17 00:00:00 2001
+From: stlalpha <spaceman@themcbros.com>
+Date: Fri, 17 Oct 2025 12:31:11 -0500
+Subject: [PATCH] Fix idev.so and tapetest.so compilation on macOS
+
+The configure script's objdump-based symbol detection doesn't work on
+macOS (Mach-O binary format), leaving LIBC_OPEN, LIBC_READ, LIBC_WRITE,
+and LIBC_FSTAT macros empty in config.h.
+
+This causes compilation failures in idev.c and tapetest.c when the
+preprocessor expands function names to nothing.
+
+Solution:
+- Detect when these macros are empty using the existing ISEMPTY() macro
+- On macOS (__APPLE__), define them to the correct symbol names:
+  - _open (not open)
+  - _read (not read)
+  - _write (not write)
+  - _fstat (not fstat)
+- On other platforms, use unprefixed names or error out
+
+Changes:
+- idev.c: Add conditional symbol definitions after macro declarations
+- tapetest.c: Replace #error directives with conditional macOS handling
+- Both: Use TOSTRING() macro for dlsym() calls to get correct symbol names
+
+Result:
+All three components now compile cleanly on macOS:
+- mbuffer (main binary)
+- idev.so (I/O interception library)
+- tapetest.so (tape device emulation library)
+
+Warnings about macro redefinition are expected and harmless - they confirm
+we're overriding the empty config.h definitions with the correct values.
+---
+ idev.c     | 23 +++++++++++++++++++++++
+ tapetest.c | 16 ++++++++++++++--
+ 2 files changed, 37 insertions(+), 2 deletions(-)
+
+diff --git a/idev.c b/idev.c
+index 7d0742a..0bce5ad 100644
+--- a/idev.c
++++ b/idev.c
+@@ -34,10 +34,33 @@
+ #define STRINGIFY(x) #x
+ #define TOSTRING(x) STRINGIFY(x)
+ 
++/* macOS uses single underscore prefix for C library symbols */
++#if ISEMPTY(LIBC_OPEN)
++#undef LIBC_OPEN
++#ifdef __APPLE__
++#define LIBC_OPEN _open
++#else
++#define LIBC_OPEN open
++#endif
++#endif
++
++#if ISEMPTY(LIBC_READ)
++#undef LIBC_READ
++#ifdef __APPLE__
++#define LIBC_READ _read
++#else
++#define LIBC_READ read
++#endif
++#endif
++
+ #if ISEMPTY(LIBC_FSTAT)
+ #undef LIBC_FSTAT
++#ifdef __APPLE__
++#define LIBC_FSTAT _fstat
++#else
+ #define LIBC_FSTAT fstat
+ #endif
++#endif
+ 
+ 
+ ssize_t (*d_open)(const char *path, int oflag, ...) = 0;
+diff --git a/tapetest.c b/tapetest.c
+index f16673c..c8f2621 100644
+--- a/tapetest.c
++++ b/tapetest.c
+@@ -52,13 +52,25 @@
+ #define EXPAND(A) A ## 1
+ #define ISEMPTY(A) EXPAND(A)
+ 
++#define STRINGIFY(x) #x
++#define TOSTRING(x) STRINGIFY(x)
++
++/* macOS uses single underscore prefix for C library symbols */
+ #if !defined(LIBC_OPEN) || (ISEMPTY(LIBC_OPEN) == 1)
++#ifdef __APPLE__
++#define LIBC_OPEN _open
++#else
+ #error name of libc open() could not be determined - test cannot be performed
+ #endif
++#endif
+ 
+ #if !defined(LIBC_WRITE) || (ISEMPTY(LIBC_WRITE) == 1)
++#ifdef __APPLE__
++#define LIBC_WRITE _write
++#else
+ #error name of libc write() could not be determined - test cannot be performed
+ #endif
++#endif
+ 
+ /* Block number where we start signalling imminent end of tape */
+ #define EARLY_END_BLOCK 5
+@@ -85,7 +97,7 @@ int LIBC_OPEN(const char *path, int oflag, ...)
+ 	int mode = va_arg(val,int);
+ 	va_end(val);
+ 	if (0 == orig_open) {
+-		orig_open = (open_func_t)dlsym(RTLD_NEXT, "open");
++		orig_open = (open_func_t)dlsym(RTLD_NEXT, TOSTRING(LIBC_OPEN));
+ 	}
+ 	if (strncmp(path, "output", 6) == 0) {
+ 		printf("[INTERCEPT] open: %s", path);
+@@ -116,7 +128,7 @@ int LIBC_OPEN(const char *path, int oflag, ...)
+ ssize_t LIBC_WRITE(int filedes, const void *buf, size_t nbyte)
+ {
+ 	if (0 == orig_write) {
+-		orig_write = (write_func_t)dlsym(RTLD_NEXT, "write");
++		orig_write = (write_func_t)dlsym(RTLD_NEXT, TOSTRING(LIBC_WRITE));
+ 	}
+ 	if (filedes == file) {
+ 		printf("[INTERCEPT] write(block %d): ", block);
+-- 
+2.39.5 (Apple Git-154)
+
