@@ -35,6 +35,30 @@
 #endif
 #endif
 
+#ifndef HAVE_SEM_GETVALUE
+#include <semaphore.h>
+#include <stdatomic.h>
+
+typedef struct {
+	sem_t *sem;
+	atomic_int value;
+	char name[32];
+} mbuffer_sem_t;
+
+int mbuffer_sem_init(mbuffer_sem_t *sem, int pshared, unsigned int value);
+int mbuffer_sem_post(mbuffer_sem_t *sem);
+int mbuffer_sem_wait(mbuffer_sem_t *sem);
+int mbuffer_sem_getvalue(mbuffer_sem_t *sem, int *sval);
+int mbuffer_sem_destroy(mbuffer_sem_t *sem);
+
+#define sem_t mbuffer_sem_t
+#define sem_init mbuffer_sem_init
+#define sem_post mbuffer_sem_post
+#define sem_wait mbuffer_sem_wait
+#define sem_getvalue mbuffer_sem_getvalue
+#define sem_destroy mbuffer_sem_destroy
+#endif
+
 int mt_usleep(unsigned long long sleep_usecs);
 long long enforceSpeedLimit(unsigned long long limit, long long num, struct timespec *last);
 void releaseLock(void *l);

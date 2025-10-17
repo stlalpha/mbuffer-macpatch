@@ -189,3 +189,85 @@ const char *hBytes(unsigned long long v)
 }
 
 
+#ifndef HAVE_SEM_GETVALUE
+/*
+ * Semaphore wrapper implementation for platforms without sem_getvalue().
+ * This includes macOS, which deliberately does not provide sem_getvalue()
+ * and also does not support unnamed semaphores (sem_init).
+ *
+ * The approach is to:
+ * 1. Use named semaphores (sem_open) instead of unnamed semaphores
+ * 2. Maintain an atomic counter alongside the semaphore for value tracking
+ * 3. Generate unique names for each semaphore based on pointer address
+ *
+ * Thread-safety: The atomic counter provides thread-safe value tracking.
+ * The actual synchronization is still done by the underlying semaphore.
+ */
+
+#include <sys/time.h>
+
+/* Save the real semaphore function names before they get redefined */
+#undef sem_post
+#undef sem_wait
+
+static atomic_int sem_counter = 0;
+
+int mbuffer_sem_init(mbuffer_sem_t *s, int pshared, unsigned int value)
+{
+	struct timeval tv;
+	int counter = atomic_fetch_add(&sem_counter, 1);
+
+	/* Generate a unique name using PID, timestamp, and counter */
+	gettimeofday(&tv, NULL);
+	snprintf(s->name, sizeof(s->name), "/mbuf_%d_%ld_%d",
+		getpid(), (long)tv.tv_usec, counter);
+
+	/* First unlink any existing semaphore with this name */
+	sem_unlink(s->name);
+
+	/* Create a named semaphore */
+	s->sem = sem_open(s->name, O_CREAT | O_EXCL, 0600, value);
+	if (s->sem == SEM_FAILED) {
+		return -1;
+	}
+
+	atomic_store(&s->value, (int)value);
+	return 0;
+}
+
+int mbuffer_sem_post(mbuffer_sem_t *s)
+{
+	int ret = sem_post(s->sem);
+	if (ret == 0) {
+		atomic_fetch_add(&s->value, 1);
+	}
+	return ret;
+}
+
+int mbuffer_sem_wait(mbuffer_sem_t *s)
+{
+	int ret = sem_wait(s->sem);
+	if (ret == 0) {
+		atomic_fetch_sub(&s->value, 1);
+	}
+	return ret;
+}
+
+int mbuffer_sem_getvalue(mbuffer_sem_t *s, int *sval)
+{
+	*sval = atomic_load(&s->value);
+	return 0;
+}
+
+int mbuffer_sem_destroy(mbuffer_sem_t *s)
+{
+	if (s->sem && (s->sem != SEM_FAILED)) {
+		sem_close(s->sem);
+		sem_unlink(s->name);
+		s->sem = NULL;
+	}
+	return 0;
+}
+#endif
+
+

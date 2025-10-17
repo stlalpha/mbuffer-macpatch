@@ -21,7 +21,10 @@
 #define GLOBALS_H
 
 #include <pthread.h>
-#include <semaphore.h>
+/* Note: Do not include <semaphore.h> directly here.
+ * Include common.h before including globals.h to ensure proper
+ * semaphore type definitions (including platform-specific wrappers).
+ */
 
 extern dest_t *Dest;
 
