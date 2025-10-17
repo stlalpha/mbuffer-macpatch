@@ -1,0 +1,260 @@
+From 47102ce9d18670830688d97f4d746fd658a34dd0 Mon Sep 17 00:00:00 2001
+From: stlalpha <spaceman@themcbros.com>
+Date: Fri, 17 Oct 2025 11:27:55 -0500
+Subject: [PATCH] Add macOS support with semaphore wrapper and platform fixes
+
+This patch enables mbuffer to build and run on macOS by working around
+platform limitations and adding missing platform-specific support.
+
+Changes:
+- Add sem_getvalue() detection in configure.in
+- Implement semaphore wrapper using named semaphores for macOS
+  (macOS doesn't support unnamed semaphores or sem_getvalue)
+- Add atomic counter for thread-safe semaphore value tracking
+- Add macOS memory detection using Mach VM statistics API
+- Fix fsync error handling to properly recognize EOPNOTSUPP/ENOTSUP
+  on macOS (fsync on pipes/TTY returns these on macOS)
+
+Technical details:
+- Named semaphores (sem_open) used instead of unnamed (sem_init)
+- Unique semaphore names generated from PID, timestamp, and counter
+- Memory detection uses host_statistics64() to query VM statistics
+- Include order adjusted to ensure wrapper definitions take precedence
+---
+ common.c     | 82 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ common.h     | 24 +++++++++++++++
+ configure.in |  1 +
+ globals.c    |  1 +
+ globals.h    |  5 +++-
+ mbuffer.c    | 25 +++++++++++++---
+ 6 files changed, 133 insertions(+), 5 deletions(-)
+
+diff --git a/common.c b/common.c
+index ae0fdfb..fcc13c1 100644
+--- a/common.c
++++ b/common.c
+@@ -189,3 +189,85 @@ const char *hBytes(unsigned long long v)
+ }
+ 
+ 
++#ifndef HAVE_SEM_GETVALUE
++/*
++ * Semaphore wrapper implementation for platforms without sem_getvalue().
++ * This includes macOS, which deliberately does not provide sem_getvalue()
++ * and also does not support unnamed semaphores (sem_init).
++ *
++ * The approach is to:
++ * 1. Use named semaphores (sem_open) instead of unnamed semaphores
++ * 2. Maintain an atomic counter alongside the semaphore for value tracking
++ * 3. Generate unique names for each semaphore based on pointer address
++ *
++ * Thread-safety: The atomic counter provides thread-safe value tracking.
++ * The actual synchronization is still done by the underlying semaphore.
++ */
++
++#include <sys/time.h>
++
++/* Save the real semaphore function names before they get redefined */
++#undef sem_post
++#undef sem_wait
++
++static atomic_int sem_counter = 0;
++
++int mbuffer_sem_init(mbuffer_sem_t *s, int pshared, unsigned int value)
++{
++	struct timeval tv;
++	int counter = atomic_fetch_add(&sem_counter, 1);
++
++	/* Generate a unique name using PID, timestamp, and counter */
++	gettimeofday(&tv, NULL);
++	snprintf(s->name, sizeof(s->name), "/mbuf_%d_%ld_%d",
++		getpid(), (long)tv.tv_usec, counter);
++
++	/* First unlink any existing semaphore with this name */
++	sem_unlink(s->name);
++
++	/* Create a named semaphore */
++	s->sem = sem_open(s->name, O_CREAT | O_EXCL, 0600, value);
++	if (s->sem == SEM_FAILED) {
++		return -1;
++	}
++
++	atomic_store(&s->value, (int)value);
++	return 0;
++}
++
++int mbuffer_sem_post(mbuffer_sem_t *s)
++{
++	int ret = sem_post(s->sem);
++	if (ret == 0) {
++		atomic_fetch_add(&s->value, 1);
++	}
++	return ret;
++}
++
++int mbuffer_sem_wait(mbuffer_sem_t *s)
++{
++	int ret = sem_wait(s->sem);
++	if (ret == 0) {
++		atomic_fetch_sub(&s->value, 1);
++	}
++	return ret;
++}
++
++int mbuffer_sem_getvalue(mbuffer_sem_t *s, int *sval)
++{
++	*sval = atomic_load(&s->value);
++	return 0;
++}
++
++int mbuffer_sem_destroy(mbuffer_sem_t *s)
++{
++	if (s->sem && (s->sem != SEM_FAILED)) {
++		sem_close(s->sem);
++		sem_unlink(s->name);
++		s->sem = NULL;
++	}
++	return 0;
++}
++#endif
++
++
+diff --git a/common.h b/common.h
+index 997c4e3..79fcdd3 100644
+--- a/common.h
++++ b/common.h
+@@ -35,6 +35,30 @@
+ #endif
+ #endif
+ 
++#ifndef HAVE_SEM_GETVALUE
++#include <semaphore.h>
++#include <stdatomic.h>
++
++typedef struct {
++	sem_t *sem;
++	atomic_int value;
++	char name[32];
++} mbuffer_sem_t;
++
++int mbuffer_sem_init(mbuffer_sem_t *sem, int pshared, unsigned int value);
++int mbuffer_sem_post(mbuffer_sem_t *sem);
++int mbuffer_sem_wait(mbuffer_sem_t *sem);
++int mbuffer_sem_getvalue(mbuffer_sem_t *sem, int *sval);
++int mbuffer_sem_destroy(mbuffer_sem_t *sem);
++
++#define sem_t mbuffer_sem_t
++#define sem_init mbuffer_sem_init
++#define sem_post mbuffer_sem_post
++#define sem_wait mbuffer_sem_wait
++#define sem_getvalue mbuffer_sem_getvalue
++#define sem_destroy mbuffer_sem_destroy
++#endif
++
+ int mt_usleep(unsigned long long sleep_usecs);
+ long long enforceSpeedLimit(unsigned long long limit, long long num, struct timespec *last);
+ void releaseLock(void *l);
+diff --git a/configure.in b/configure.in
+index 723dfe7..9d156c9 100644
+--- a/configure.in
++++ b/configure.in
+@@ -120,6 +120,7 @@ AC_CHECK_LIB(pthread, pthread_mutex_init)
+ AC_SEARCH_LIBS(dlsym,dl)
+ AC_SEARCH_LIBS(clock_gettime,rt,,AC_MSG_ERROR(could not find the library containing clock_gettime!))
+ AC_SEARCH_LIBS(sem_init,rt posix,,AC_MSG_ERROR(could not find semaphore functions!))
++AC_CHECK_FUNCS(sem_getvalue)
+ AC_SEARCH_LIBS(rint,m,,AC_MSG_ERROR(unable to find rint))
+ AC_SEARCH_LIBS(seteuid,c,AC_DEFINE([HAVE_SETEUID], [1], [Define to 1 if you have the seteuid() function]),)
+ AC_SEARCH_LIBS(hstrerror,resolv socket nsl,AC_DEFINE([HAVE_HSTRERROR], [1], [Define to 1 if you have the hstrerror() function]),)
+diff --git a/globals.c b/globals.c
+index 65b94c4..f852bdd 100644
+--- a/globals.c
++++ b/globals.c
+@@ -17,6 +17,7 @@
+  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
++#include "common.h"
+ #include "dest.h"
+ #include "globals.h"
+ #include <fcntl.h>
+diff --git a/globals.h b/globals.h
+index b3d7b88..9aad130 100644
+--- a/globals.h
++++ b/globals.h
+@@ -21,7 +21,10 @@
+ #define GLOBALS_H
+ 
+ #include <pthread.h>
+-#include <semaphore.h>
++/* Note: Do not include <semaphore.h> directly here.
++ * Include common.h before including globals.h to ensure proper
++ * semaphore type definitions (including platform-specific wrappers).
++ */
+ 
+ extern dest_t *Dest;
+ 
+diff --git a/mbuffer.c b/mbuffer.c
+index 90d120c..b60b5dc 100644
+--- a/mbuffer.c
++++ b/mbuffer.c
+@@ -51,6 +51,11 @@ typedef int caddr_t;
+ #include <uvm/uvm_extern.h>
+ #endif
+ 
++#ifdef __APPLE__
++#include <mach/mach.h>
++#include <mach/mach_host.h>
++#endif
++
+ #ifdef HAVE_SENDFILE
+ #ifdef HAVE_SENDFILE_H
+ #include <sys/sendfile.h>
+@@ -391,7 +396,7 @@ static inline void terminateSender(int fd, dest_t *d, intptr_t ret)
+ 			err = fsync(fd);
+ 		while ((err != 0) && (errno == EINTR));
+ 		if (err != 0) {
+-			if ((errno == EINVAL) || (errno == EBADRQC)) {
++			if ((errno == EINVAL) || (errno == EBADRQC) || (errno == EOPNOTSUPP) || (errno == ENOTSUP)) {
+ 				infomsg("syncing unsupported on %s: omitted.\n",d->arg);
+ 			} else {
+ 				warningmsg("unable to sync %s: %s\n",d->arg,strerror(errno));
+@@ -631,11 +636,11 @@ static void terminateOutputThread(dest_t *d, int status)
+ 	int err;
+ 
+ 	infomsg("outputThread: syncing %s...\n",d->arg);
+-	do 
++	do
+ 		err = fsync(d->fd);
+ 	while ((err != 0) && (errno == EINTR));
+ 	if (err != 0) {
+-		if ((errno == EINVAL) || (errno == EBADRQC)) {
++		if ((errno == EINVAL) || (errno == EBADRQC) || (errno == EOPNOTSUPP) || (errno == ENOTSUP)) {
+ 			infomsg("syncing unsupported on %s: omitted.\n",d->arg);
+ 		} else {
+ 			warningmsg("unable to sync %s: %s\n",d->arg,strerror(errno));
+@@ -1047,8 +1052,20 @@ static void initDefaults()
+ 	} else {
+ 		AvP = total.t_free;
+ 	}
++#elif defined(__APPLE__)
++	/* macOS: use vm_statistics64 to get memory information */
++	mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
++	vm_statistics64_data_t vm_stat;
++	if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&vm_stat, &count) == KERN_SUCCESS) {
++		/* Calculate available pages: free + inactive + purgeable + speculative */
++		AvP = vm_stat.free_count + vm_stat.inactive_count +
++		      vm_stat.purgeable_count + vm_stat.speculative_count;
++	} else {
++		warningmsg("unable to determine number of available pages on macOS\n");
++		AvP = 0;
++	}
+ #else
+-	warningmsg("no mechanism to determine number of available pages\n",strerror(errno));
++	warningmsg("no mechanism to determine number of available pages\n");
+ #endif
+ 	if (AvP && PgSz) {
+ 		debugmsg("available memory: %llukB / %li pages\n",((long long unsigned)AvP*(long long unsigned)PgSz)>>10,AvP);
+-- 
+2.39.5 (Apple Git-154)
+
