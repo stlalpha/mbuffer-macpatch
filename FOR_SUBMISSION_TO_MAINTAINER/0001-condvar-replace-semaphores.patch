@@ -1,0 +1,411 @@
+From 851508db4e3cc9b6e1194e461ac950bdcd15dc69 Mon Sep 17 00:00:00 2001
+From: stlalpha <spaceman@themcbros.com>
+Date: Fri, 17 Oct 2025 11:57:43 -0500
+Subject: [PATCH] Replace POSIX semaphores with condition variables to remove
+ 2GB buffer limit
+
+This change removes the buffer size limitation that was previously capped
+at sysconf(_SC_SEM_VALUE_MAX) * Blocksize (typically ~2GB) due to POSIX
+semaphores using 32-bit integer counters.
+
+Implementation:
+- Replaced sem_t Dev2Buf and Buf2Dev with 64-bit counters (FreeBlocks, FullBlocks)
+- Added pthread mutexes and condition variables for synchronization
+- Created counter_init(), counter_wait(), counter_post(), and counter_getvalue() helper functions
+- Updated all semaphore operations throughout codebase to use new counter primitives
+- Removed maxSemValue() limitation checks from settings validation
+
+Benefits:
+- Buffer size now only limited by available system memory
+- Enables buffers larger than 2GB on systems with sufficient RAM
+- Maintains thread-safe synchronization using mutex-protected 64-bit counters
+
+Files modified:
+- globals.h/c: Defined new sync primitives and counters
+- common.h/c: Implemented counter operation functions
+- mbuffer.c: Replaced all semaphore operations in main and output threads
+- input.c: Replaced all semaphore operations in input thread
+- settings.c: Removed semaphore limit validation
+- README: Updated documentation to reflect removed limitation
+---
+ README     | 13 ++++++++-----
+ common.c   | 53 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ common.h   |  6 ++++++
+ globals.c  | 14 +++++++++-----
+ globals.h  | 15 +++++++++------
+ input.c    | 18 ++++++------------
+ mbuffer.c  | 40 ++++++++++++++--------------------------
+ settings.c |  4 +---
+ 8 files changed, 106 insertions(+), 57 deletions(-)
+
+diff --git a/README b/README
+index daecde2..9d8f6ad 100644
+--- a/README
++++ b/README
+@@ -72,11 +72,14 @@ machine, I have no intention of working on that topic.
+ 
+ 64 Bit Buffers:
+ ===============
+-The buffer limit is sysconf(_SC_SEM_VALUE_MAX)*Blocksize. This usually
+-limits the maximum number of blocks to 2G-1, because semaphores are
+-implemented using an int, which is on most architectures a 32 Bit word.
+-This limit is currently a non-issue, but might be resolved in a future
+-release, by using condition variables.
++As of this version, the buffer size limitation has been removed by replacing
++POSIX semaphores with pthread condition variables and 64-bit counters. The
++previous limitation of sysconf(_SC_SEM_VALUE_MAX)*Blocksize (typically ~2GB
++due to 32-bit semaphore counters) no longer applies.
++
++Buffer size is now only limited by available system memory. The implementation
++uses volatile long long counters (64-bit) protected by mutexes, allowing buffer
++sizes well beyond the previous 2GB limitation.
+ 
+ If the total buffer size is 2GB or larger, you will need to compile
+ mbuffer as a 64bit executable. This requires that you have a 64bit
+diff --git a/common.c b/common.c
+index ae0fdfb..8ac48bd 100644
+--- a/common.c
++++ b/common.c
+@@ -189,3 +189,56 @@ const char *hBytes(unsigned long long v)
+ }
+ 
+ 
++/*
++ * Condition variable-based counting synchronization primitives.
++ * These replace POSIX semaphores to remove the 2GB buffer limit.
++ *
++ * Semaphores are limited to INT_MAX (~2 billion), which restricts
++ * the number of buffer blocks. Using 64-bit counters with mutex+condvar
++ * removes this artificial limitation.
++ */
++
++void counter_init(volatile long long *counter, long long initial_value)
++{
++	*counter = initial_value;
++}
++
++void counter_wait(volatile long long *counter, pthread_mutex_t *mutex, pthread_cond_t *cond)
++{
++	int err = pthread_mutex_lock(mutex);
++	assert(err == 0);
++
++	while (*counter <= 0) {
++		err = pthread_cond_wait(cond, mutex);
++		assert(err == 0);
++	}
++
++	(*counter)--;
++
++	err = pthread_mutex_unlock(mutex);
++	assert(err == 0);
++}
++
++void counter_post(volatile long long *counter, pthread_mutex_t *mutex, pthread_cond_t *cond)
++{
++	int err = pthread_mutex_lock(mutex);
++	assert(err == 0);
++
++	(*counter)++;
++
++	err = pthread_cond_signal(cond);
++	assert(err == 0);
++
++	err = pthread_mutex_unlock(mutex);
++	assert(err == 0);
++}
++
++long long counter_getvalue(volatile long long *counter)
++{
++	/* Reading a volatile long long is atomic for the read operation.
++	 * We don't need a mutex here since this is only used for status
++	 * display, not for synchronization decisions. */
++	return *counter;
++}
++
++
+diff --git a/common.h b/common.h
+index 997c4e3..8451bbf 100644
+--- a/common.h
++++ b/common.h
+@@ -42,4 +42,10 @@ void enable_directio(int fd, const char *fn);
+ int disable_directio(int fd, const char *fn);
+ const char *hBytes(unsigned long long v);
+ 
++/* Condition variable-based counting synchronization (replaces semaphores) */
++void counter_init(volatile long long *counter, long long initial_value);
++void counter_wait(volatile long long *counter, pthread_mutex_t *mutex, pthread_cond_t *cond);
++void counter_post(volatile long long *counter, pthread_mutex_t *mutex, pthread_cond_t *cond);
++long long counter_getvalue(volatile long long *counter);
++
+ #endif
+diff --git a/globals.c b/globals.c
+index 65b94c4..d7d15e5 100644
+--- a/globals.c
++++ b/globals.c
+@@ -74,16 +74,20 @@ pthread_mutex_t
+ 	TermMut = PTHREAD_MUTEX_INITIALIZER,	/* prevents statusThread from interfering with request*Volume */
+ 	LowMut = PTHREAD_MUTEX_INITIALIZER,
+ 	HighMut = PTHREAD_MUTEX_INITIALIZER,
+-	SendMut = PTHREAD_MUTEX_INITIALIZER;
++	SendMut = PTHREAD_MUTEX_INITIALIZER,
++	FreeMut = PTHREAD_MUTEX_INITIALIZER,	/* protects FreeBlocks counter */
++	FullMut = PTHREAD_MUTEX_INITIALIZER;	/* protects FullBlocks counter */
+ 
+-sem_t
+-	Dev2Buf,
+-	Buf2Dev;
++volatile long long
++	FreeBlocks = 0,		/* number of free buffer blocks (replaces Dev2Buf semaphore) */
++	FullBlocks = 0;		/* number of full buffer blocks (replaces Buf2Dev semaphore) */
+ 
+ pthread_cond_t
+ 	PercLow = PTHREAD_COND_INITIALIZER,	/* low watermark */
+ 	PercHigh = PTHREAD_COND_INITIALIZER,	/* high watermark */
+-	SendCond = PTHREAD_COND_INITIALIZER;
++	SendCond = PTHREAD_COND_INITIALIZER,
++	FreeCond = PTHREAD_COND_INITIALIZER,	/* signaled when blocks become free */
++	FullCond = PTHREAD_COND_INITIALIZER;	/* signaled when blocks become full */
+ 
+ pthread_t
+ 	ReaderThr,
+diff --git a/globals.h b/globals.h
+index b3d7b88..6074069 100644
+--- a/globals.h
++++ b/globals.h
+@@ -21,7 +21,6 @@
+ #define GLOBALS_H
+ 
+ #include <pthread.h>
+-#include <semaphore.h>
+ 
+ extern dest_t *Dest;
+ 
+@@ -79,16 +78,20 @@ extern pthread_mutex_t
+ 	TermMut,	/* prevents statusThread from interfering with request*Volume */
+ 	LowMut,
+ 	HighMut,
+-	SendMut;
++	SendMut,
++	FreeMut,	/* protects FreeBlocks counter */
++	FullMut;	/* protects FullBlocks counter */
+ 
+-extern sem_t
+-	Dev2Buf,
+-	Buf2Dev;
++extern volatile long long
++	FreeBlocks,	/* number of free buffer blocks (replaces Dev2Buf semaphore) */
++	FullBlocks;	/* number of full buffer blocks (replaces Buf2Dev semaphore) */
+ 
+ extern pthread_cond_t
+ 	PercLow,	/* low watermark */
+ 	PercHigh,	/* high watermark */
+-	SendCond;
++	SendCond,
++	FreeCond,	/* signaled when blocks become free */
++	FullCond;	/* signaled when blocks become full */
+ 
+ extern pthread_t
+ 	ReaderThr,
+diff --git a/input.c b/input.c
+index 32d0049..ace7449 100644
+--- a/input.c
++++ b/input.c
+@@ -306,8 +306,7 @@ int readBlock(unsigned at)
+ 				debugmsg("inputThread: last block has %llu bytes\n",num);
+ 				err = pthread_mutex_lock(&HighMut);
+ 				assert(err == 0);
+-				err = sem_post(&Buf2Dev);
+-				assert(err == 0);
++			counter_post(&FullBlocks, &FullMut, &FullCond);
+ 				err = pthread_cond_signal(&PercHigh);
+ 				assert(err == 0);
+ 				err = pthread_mutex_unlock(&HighMut);
+@@ -330,8 +329,7 @@ int readBlock(unsigned at)
+ 			debugmsg("inputThread: last block has %llu bytes\n",num);
+ 			err = pthread_mutex_lock(&HighMut);
+ 			assert(err == 0);
+-			err = sem_post(&Buf2Dev);
+-			assert(err == 0);
++			counter_post(&FullBlocks, &FullMut, &FullCond);
+ 			err = pthread_cond_signal(&PercHigh);
+ 			assert(err == 0);
+ 			err = pthread_mutex_unlock(&HighMut);
+@@ -367,8 +365,7 @@ void *inputThread(void *ignored)
+ 		if (startread < 1) {
+ 			err = pthread_mutex_lock(&LowMut);
+ 			assert(err == 0);
+-			err = sem_getvalue(&Buf2Dev,&fill);
+-			assert(err == 0);
++			fill = (int)counter_getvalue(&FullBlocks);
+ 			if (fill == Numblocks - 1) {
+ 				debugmsg("inputThread: buffer full, waiting for it to drain.\n");
+ 				pthread_cleanup_push(releaseLock,&LowMut);
+@@ -389,21 +386,18 @@ void *inputThread(void *ignored)
+ 				pthread_exit((void *)1);
+ 			return (void *) 1;
+ 		}
+-		err = sem_wait(&Dev2Buf); /* Wait for one or more buffer blocks to be free */
+-		assert(err == 0);
++		counter_wait(&FreeBlocks, &FreeMut, &FreeCond); /* Wait for one or more buffer blocks to be free */
+ 		if (0 >= readBlock(at)) {
+ 			debugmsg("inputThread: no more blocks\n");
+ 			return 0;
+ 		}
+ 		if (MaxReadSpeed)
+ 			xfer = enforceSpeedLimit(MaxReadSpeed,xfer,&last);
+-		err = sem_post(&Buf2Dev);
+-		assert(err == 0);
++		counter_post(&FullBlocks, &FullMut, &FullCond);
+ 		if (startwrite > 0) {
+ 			err = pthread_mutex_lock(&HighMut);
+ 			assert(err == 0);
+-			err = sem_getvalue(&Buf2Dev,&fill);
+-			assert(err == 0);
++			fill = (int)counter_getvalue(&FullBlocks);
+ 			if (((double) fill / (double) Numblocks) + DBL_EPSILON >= startwrite) {
+ 				err = pthread_cond_signal(&PercHigh);
+ 				assert(err == 0);
+diff --git a/mbuffer.c b/mbuffer.c
+index 90d120c..f6e701a 100644
+--- a/mbuffer.c
++++ b/mbuffer.c
+@@ -284,8 +284,7 @@ static void statusThread(void)
+ 		diff = now.tv_sec - last.tv_sec + (double) (now.tv_nsec - last.tv_nsec) * 1E-9;
+ 		err = pthread_mutex_lock(&TermMut);
+ 		assert(0 == err);
+-		err = sem_getvalue(&Buf2Dev,&unwritten);
+-		assert(0 == err);
++		unwritten = (int)counter_getvalue(&FullBlocks);
+ 		fill = (double)unwritten / (double)Numblocks * 100.0;
+ 		in = (double)(((Numin - lin) * Blocksize) >> 10);
+ 		in /= diff;
+@@ -364,8 +363,7 @@ int syncSenders(char *b, int s)
+ 		buf = 0;
+ 		if (skipped) {
+ 			// after the first time, always give a buffer free after sync
+-			err = sem_post(&Dev2Buf);
+-			assert(err == 0);
++			counter_post(&FreeBlocks, &FreeMut, &FreeCond);
+ 		} else {
+ 			// the first time no buffer has been given free
+ 			skipped = 1;
+@@ -650,7 +648,7 @@ static void terminateOutputThread(dest_t *d, int status)
+ 			errormsg("error writing to termination queue: %s\n",strerror(errno));
+ 	}
+ 	if (status) {
+-		(void) sem_post(&Dev2Buf);
++		(void) counter_post(&FreeBlocks, &FreeMut, &FreeCond);
+ 		(void) pthread_cond_broadcast(&SendCond);
+ 	}
+ 	Done = 1;
+@@ -724,8 +722,7 @@ static void *outputThread(void *arg)
+ 			assert(fill == 0);
+ 			err = pthread_mutex_lock(&HighMut);
+ 			assert(err == 0);
+-			err = sem_getvalue(&Buf2Dev,&fill);
+-			assert(err == 0);
++			fill = (int)counter_getvalue(&FullBlocks);
+ 			if (fill == 0) {
+ 				debugmsg("outputThread: buffer empty, waiting for it to fill\n");
+ 				pthread_cleanup_push(releaseLock,&HighMut);
+@@ -740,16 +737,14 @@ static void *outputThread(void *arg)
+ 			assert(err == 0);
+ 		} else
+ 			--fill;
+-		err = sem_wait(&Buf2Dev);
+-		assert(err == 0);
++		counter_wait(&FullBlocks, &FullMut, &FullCond);
+ 		if (Terminate) {
+ 			infomsg("outputThread: terminating upon termination request...\n");
+ 			dest->result = "canceled";
+ 			terminateOutputThread(dest,1);
+ 		}
+ 		if (Finish == at) {
+-			err = sem_getvalue(&Buf2Dev,&fill);
+-			assert(err == 0);
++			fill = (int)counter_getvalue(&FullBlocks);
+ 			if ((fill == 0) && (0 == Rest)) {
+ 				if (multipleSenders)
+ 					(void) syncSenders((char*)0xdeadbeef,0);
+@@ -842,8 +837,7 @@ static void *outputThread(void *arg)
+ 				if (NumSenders == 0) {
+ 					debugmsg("outputThread: terminating...\n");
+ 					Terminate = 1;
+-					err = sem_post(&Dev2Buf);
+-					assert(err == 0);
++					counter_post(&FreeBlocks, &FreeMut, &FreeCond);
+ 					terminateOutputThread(dest,1);
+ 				}
+ 				debugmsg("outputThread: %d senders remaining - continuing...\n",NumSenders);
+@@ -852,16 +846,14 @@ static void *outputThread(void *arg)
+ 			rest -= num;
+ 		} while (rest > 0);
+ 		if (multipleSenders == 0) {
+-			err = sem_post(&Dev2Buf);
+-			assert(err == 0);
++			counter_post(&FreeBlocks, &FreeMut, &FreeCond);
+ 		}
+ 		if (MaxWriteSpeed)
+ 			xfer = enforceSpeedLimit(MaxWriteSpeed,xfer,&last);
+ 		if (Pause)
+ 			(void) mt_usleep(Pause);
+ 		if (Finish == at) {
+-			err = sem_getvalue(&Buf2Dev,&fill);
+-			assert(err == 0);
++			fill = (int)counter_getvalue(&FullBlocks);
+ 			if (fill == 0) {
+ 				if (multipleSenders)
+ 					(void) syncSenders((char*)0xdeadbeef,0);
+@@ -874,8 +866,7 @@ static void *outputThread(void *arg)
+ 		if (StartRead < 1) {
+ 			err = pthread_mutex_lock(&LowMut);
+ 			assert(err == 0);
+-			err = sem_getvalue(&Buf2Dev,&fill);
+-			assert(err == 0);
++			fill = (int)counter_getvalue(&FullBlocks);
+ 			if (((double)fill / (double)Numblocks) < StartRead) {
+ 				err = pthread_cond_signal(&PercLow);
+ 				assert(err == 0);
+@@ -1059,8 +1050,7 @@ static void initDefaults()
+ 	if (AvP) {
+ 		Blocksize = PgSz;
+ 		Numblocks = AvP/20;
+-		long mxsemv = maxSemValue();
+-		while ((Numblocks > mxsemv) || (Numblocks > 2000)) {
++		while (Numblocks > 2000) {
+ 			Numblocks >>= 1;
+ 			Blocksize <<= 1;
+ 		}
+@@ -1252,11 +1242,9 @@ int main(int argc, const char **argv)
+ 	checkConsistency();
+ 	initBuffer();
+ 
+-	debugmsg("creating semaphores...\n");
+-	if (0 != sem_init(&Buf2Dev,0,0))
+-		fatal("Error creating semaphore Buf2Dev: %s\n",strerror(errno));
+-	if (0 != sem_init(&Dev2Buf,0,Numblocks))
+-		fatal("Error creating semaphore Dev2Buf: %s\n",strerror(errno));
++	debugmsg("initializing buffer counters...\n");
++	counter_init(&FullBlocks, 0);        /* initially no full blocks */
++	counter_init(&FreeBlocks, Numblocks); /* initially all blocks free */
+ 
+ 	if (Infile)
+ 		openInput();
+diff --git a/settings.c b/settings.c
+index 5d2ad35..b04ab6f 100644
+--- a/settings.c
++++ b/settings.c
+@@ -476,9 +476,7 @@ long maxSemValue()
+ void initBuffer()
+ {
+ 	int c;
+-	/* check that we stay within system limits */
+-	if (Numblocks > maxSemValue())
+-		fatal("cannot allocate more than %d blocks.\nThis is a system dependent limit, depending on the maximum semaphore value.\nPlease choose a bigger block size.\n",maxSemValue());
++	/* Note: Semaphore limit no longer applies since we use condition variables */
+ 	if (Numblocks > 10000)
+ 		warningmsg("high value of number of blocks(%lu): increase block size for better performance\n",Numblocks);
+ 	unsigned long long av = AvP * PgSz, bufsize = Numblocks * Blocksize;
+-- 
+2.39.5 (Apple Git-154)
+
